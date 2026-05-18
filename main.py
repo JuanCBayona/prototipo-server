@@ -157,75 +157,53 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
     pdf_bytes = await file.read()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    songs_data = []
-    current_category = "General"
-    current_title = ""
-    current_lyrics = ""
-
-    # LOWERED THRESHOLDS: We will catch smaller fonts now.
-    SECTION_SIZE_THRESHOLD = 13.5  
-    TITLE_SIZE_THRESHOLD = 11.5    
-
+    full_text = "\n"
     for page in doc:
-        if page.number < 4:
-            continue
-
-        blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+        # We removed the 'page.number < 4' line so it no longer skips your extract!
         
+        # We use blocks to naturally find the spaces between paragraphs
+        blocks = page.get_text("blocks")
         for b in blocks:
-            if b['type'] == 0:
-                for line in b["lines"]:
-                    for span in line["spans"]:
-                        text = span["text"].strip()
-                        
-                        if not text or text.isdigit():
-                            continue
-                            
-                        font_size = span["size"]
-                        
-                        # DEBUG RADAR: This prints to your Render.com logs so we can see the exact sizes!
-                        if page.number == 4: # Only print page 5 (where Vandana starts) to avoid spamming the log
-                            print(f"RADAR -> Text: '{text[:20]}' | Size: {font_size}")
-                        
-                        if font_size >= SECTION_SIZE_THRESHOLD:
-                            current_category = text.title()
-                            continue
-                        
-                        elif font_size >= TITLE_SIZE_THRESHOLD:
-                            if current_title and current_lyrics:
-                                songs_data.append({
-                                    "category": current_category.strip(),
-                                    "title": current_title.strip(),
-                                    "lyrics": current_lyrics.strip()
-                                })
-                                current_lyrics = ""
-                            
-                            clean_title = re.sub(r'^[\(\d\)\.\-\s]+', '', text)
-                            current_title = clean_title
-                        
-                        else:
-                            if current_title:
-                                current_lyrics += text + "\n"
-                            
-                if current_lyrics and not current_lyrics.endswith("\n\n"):
-                    current_lyrics += "\n"
-
-    if current_title and current_lyrics:
-        songs_data.append({"category": current_category.strip(), "title": current_title.strip(), "lyrics": current_lyrics.strip()})
-
+            block_text = b[4].strip()
+            
+            # Instantly destroy stray page numbers
+            if block_text.isdigit():
+                continue
+                
+            if block_text:
+                # Force a double line break between distinct visual paragraphs for the Android UI
+                full_text += block_text + "\n\n"
+    
+    # The reliable Regex that hunts for the "(1) Title" pattern
+    chunks = re.split(r'\n\s*(\(\d+\)\s+[^\n]+)\s*\n', full_text)
+    
+    # Wipe the old database to prevent duplicates
     db.query(SongDB).delete()
     db.commit()
-
+    
+    # The text before the very first song contains the section title (e.g., "Vandana")
+    raw_category = chunks[0].strip() if len(chunks) > 0 else "General"
+    category_name = raw_category.split('\n')[-1].strip() if raw_category else "General"
+    
     saved_count = 0
-    for song in songs_data:
-        clean_lyrics = re.sub(r'\n{3,}', '\n\n', song["lyrics"])
-        if song["title"] and clean_lyrics:
-            new_song = SongDB(category=song["category"], title=song["title"], lyrics=clean_lyrics)
+    for i in range(1, len(chunks)-1, 2):
+        title = chunks[i].strip()
+        lyrics = chunks[i+1].strip()
+        
+        # Clean up any excessive spacing in the lyrics
+        lyrics = re.sub(r'\n{3,}', '\n\n', lyrics)
+        
+        # Strip the "(1) " prefix from the title so it looks clean in the app
+        clean_title = re.sub(r'^[\(\d\)\.\-\s]+', '', title)
+        
+        if clean_title and lyrics:
+            # We save it with the category so your Android app doesn't crash
+            new_song = SongDB(category=category_name, title=clean_title, lyrics=lyrics)
             db.add(new_song)
             saved_count += 1
-        
+            
     db.commit()
-    return {"message": "Parsed via Two-Tier Heuristics", "songs_extracted": saved_count}
+    return {"message": "Parsed via Regex blocks", "songs_extracted": saved_count}
 
 @app.get("/api/songs")
 def get_songs(db: Session = Depends(get_db)):
