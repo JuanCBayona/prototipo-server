@@ -157,24 +157,34 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
     pdf_bytes = await file.read()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     
-    full_text = "\n" # Pad with newline to ensure the first title is caught
+    full_text = "\n"
     for page in doc:
-        full_text += page.get_text("text") + "\n"
+        # Use "blocks" to respect the visual paragraph spacing in the PDF
+        blocks = page.get_text("blocks")
+        for b in blocks:
+            block_text = b[4].strip()
+            
+            # Instantly destroy stray page numbers
+            if block_text.isdigit():
+                continue
+                
+            if block_text:
+                # Force a double line break between distinct visual paragraphs
+                full_text += block_text + "\n\n"
     
-    # NEW REGEX: Looks for a newline, a number in parentheses, a space, and the title text
-    # e.g., "(1) Mangalacarana"
     chunks = re.split(r'\n\s*(\(\d+\)\s+[^\n]+)\s*\n', full_text)
     
-    saved_count = 0
+    # Wipe the old database to prevent duplicates when re-uploading
+    db.query(SongDB).delete()
+    db.commit()
     
-    # The split creates an array where the titles are at odd indices (1, 3, 5...)
-    # and the lyrics follow immediately at the next even index (2, 4, 6...)
+    saved_count = 0
     for i in range(1, len(chunks)-1, 2):
         title = chunks[i].strip()
         lyrics = chunks[i+1].strip()
         
-        # Clean up the lyrics by removing any extra PDF page numbers or trailing whitespace
-        lyrics = re.sub(r'\n\s*\d+\s*\n', '\n', lyrics) 
+        # Clean up any excessive spacing
+        lyrics = re.sub(r'\n{3,}', '\n\n', lyrics)
         
         if title and lyrics:
             new_song = SongDB(title=title, lyrics=lyrics)
