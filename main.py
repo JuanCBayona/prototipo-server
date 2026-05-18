@@ -151,7 +151,6 @@ def rsvp_to_event(event_id: int, rsvp: RSVPRequest, db: Session = Depends(get_db
 
 @app.post("/api/songs/upload")
 async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Automated PDF Pipeline: Parses Sections and Songs via Font Heuristics"""
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Must be a PDF file")
 
@@ -159,18 +158,15 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
     songs_data = []
-    current_category = "General" # Fallback category
+    current_category = "General"
     current_title = ""
     current_lyrics = ""
 
-    # Thresholds (Tuned for your specific Vaishnava Songbook)
-    SECTION_SIZE_THRESHOLD = 15.0  # Huge text (e.g., "Vandana")
-    TITLE_SIZE_THRESHOLD = 13.0    # Large text (e.g., "(1) Mangalacarana")
+    # LOWERED THRESHOLDS: We will catch smaller fonts now.
+    SECTION_SIZE_THRESHOLD = 13.5  
+    TITLE_SIZE_THRESHOLD = 11.5    
 
     for page in doc:
-        # SKIP THE INDEX PAGES: We ignore pages 1-4 so the parser 
-        # doesn't try to read the Table of Contents as actual songs.
-        # PyMuPDF is 0-indexed, so page index < 4 skips pages 1, 2, 3, and 4.
         if page.number < 4:
             continue
 
@@ -182,19 +178,19 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
                     for span in line["spans"]:
                         text = span["text"].strip()
                         
-                        # Skip empty lines and page numbers
                         if not text or text.isdigit():
                             continue
                             
                         font_size = span["size"]
                         
-                        # DETECT CATEGORY: Is it huge text?
+                        # DEBUG RADAR: This prints to your Render.com logs so we can see the exact sizes!
+                        if page.number == 4: # Only print page 5 (where Vandana starts) to avoid spamming the log
+                            print(f"RADAR -> Text: '{text[:20]}' | Size: {font_size}")
+                        
                         if font_size >= SECTION_SIZE_THRESHOLD:
-                            # Set the new category for all subsequent songs
                             current_category = text.title()
                             continue
                         
-                        # DETECT SONG TITLE: Is it large text?
                         elif font_size >= TITLE_SIZE_THRESHOLD:
                             if current_title and current_lyrics:
                                 songs_data.append({
@@ -204,23 +200,19 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
                                 })
                                 current_lyrics = ""
                             
-                            # Clean up numerical prefixes "(1) " from the title
                             clean_title = re.sub(r'^[\(\d\)\.\-\s]+', '', text)
                             current_title = clean_title
                         
-                        # DETECT LYRICS: Normal body text
                         else:
-                            if current_title: # Only add lyrics if we have a title active
+                            if current_title:
                                 current_lyrics += text + "\n"
                             
                 if current_lyrics and not current_lyrics.endswith("\n\n"):
                     current_lyrics += "\n"
 
-    # Catch the final song
     if current_title and current_lyrics:
         songs_data.append({"category": current_category.strip(), "title": current_title.strip(), "lyrics": current_lyrics.strip()})
 
-    # Wipe old database to prevent duplicates
     db.query(SongDB).delete()
     db.commit()
 
