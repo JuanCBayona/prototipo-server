@@ -157,20 +157,24 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
     pdf_bytes = await file.read()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     
-    full_text = ""
+    full_text = "\n" # Pad with newline to ensure the first title is caught
     for page in doc:
         full_text += page.get_text("text") + "\n"
     
-    # Regex: Looks for lines that are entirely uppercase (Song Titles)
-    # Splits the document into chunks based on these titles
-    chunks = re.split(r'\n([A-Z\s\-\,\!]{5,})\n', full_text)
+    # NEW REGEX: Looks for a newline, a number in parentheses, a space, and the title text
+    # e.g., "(1) Mangalacarana"
+    chunks = re.split(r'\n\s*(\(\d+\)\s+[^\n]+)\s*\n', full_text)
     
     saved_count = 0
-    # re.split returns [text_before, match1, text_after1, match2, text_after2...]
-    # We iterate starting from index 1 (the first title) in steps of 2
+    
+    # The split creates an array where the titles are at odd indices (1, 3, 5...)
+    # and the lyrics follow immediately at the next even index (2, 4, 6...)
     for i in range(1, len(chunks)-1, 2):
         title = chunks[i].strip()
         lyrics = chunks[i+1].strip()
+        
+        # Clean up the lyrics by removing any extra PDF page numbers or trailing whitespace
+        lyrics = re.sub(r'\n\s*\d+\s*\n', '\n', lyrics) 
         
         if title and lyrics:
             new_song = SongDB(title=title, lyrics=lyrics)
