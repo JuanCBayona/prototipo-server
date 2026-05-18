@@ -29,6 +29,7 @@ Base = declarative_base()
 class SongDB(Base):
     __tablename__ = "songs"
     id = Column(Integer, primary_key=True, index=True)
+    category = Column(String, index=True)  # NEW FIELD
     title = Column(String, index=True)
     lyrics = Column(String)
 
@@ -150,7 +151,7 @@ def rsvp_to_event(event_id: int, rsvp: RSVPRequest, db: Session = Depends(get_db
 
 @app.post("/api/songs/upload")
 async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Automated PDF Pipeline: Parses Songbook via Font Size heuristics"""
+    """Automated PDF Pipeline: Parses Sections and Songs via Font Heuristics"""
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Must be a PDF file")
 
@@ -158,50 +159,66 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
     songs_data = []
+    current_category = "General" # Fallback category
     current_title = ""
     current_lyrics = ""
 
-    # Threshold: Standard lyrics are usually size 10-12. Titles are usually 14+.
-    # We trigger a new song whenever the font size hits 13 or higher.
-    TITLE_SIZE_THRESHOLD = 13.0
+    # Thresholds (Tuned for your specific Vaishnava Songbook)
+    SECTION_SIZE_THRESHOLD = 15.0  # Huge text (e.g., "Vandana")
+    TITLE_SIZE_THRESHOLD = 13.0    # Large text (e.g., "(1) Mangalacarana")
 
     for page in doc:
-        # The "dict" format gives us granular data including exact font sizes
+        # SKIP THE INDEX PAGES: We ignore pages 1-4 so the parser 
+        # doesn't try to read the Table of Contents as actual songs.
+        # PyMuPDF is 0-indexed, so page index < 4 skips pages 1, 2, 3, and 4.
+        if page.number < 4:
+            continue
+
         blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
         
         for b in blocks:
-            if b['type'] == 0:  # Type 0 means it is text, not an image
+            if b['type'] == 0:
                 for line in b["lines"]:
                     for span in line["spans"]:
                         text = span["text"].strip()
                         
-                        # Skip empty spaces and stray page numbers instantly
+                        # Skip empty lines and page numbers
                         if not text or text.isdigit():
                             continue
                             
                         font_size = span["size"]
                         
-                        # Is this text large enough to be a Title?
-                        if font_size >= TITLE_SIZE_THRESHOLD:
-                            # If we were already reading a song, save it before starting a new one
+                        # DETECT CATEGORY: Is it huge text?
+                        if font_size >= SECTION_SIZE_THRESHOLD:
+                            # Set the new category for all subsequent songs
+                            current_category = text.title()
+                            continue
+                        
+                        # DETECT SONG TITLE: Is it large text?
+                        elif font_size >= TITLE_SIZE_THRESHOLD:
                             if current_title and current_lyrics:
-                                songs_data.append({"title": current_title.strip(), "lyrics": current_lyrics.strip()})
-                                current_lyrics = "" 
-                                current_title = text 
-                            else:
-                                # Append to the current title (in case the title wraps to two lines)
-                                current_title += " " + text
-                        else:
-                            # This is smaller body text (Sanskrit/Spanish)
-                            current_lyrics += text + "\n"
+                                songs_data.append({
+                                    "category": current_category.strip(),
+                                    "title": current_title.strip(),
+                                    "lyrics": current_lyrics.strip()
+                                })
+                                current_lyrics = ""
                             
-                # Add our double line break at the end of every visual block for the Java UI
+                            # Clean up numerical prefixes "(1) " from the title
+                            clean_title = re.sub(r'^[\(\d\)\.\-\s]+', '', text)
+                            current_title = clean_title
+                        
+                        # DETECT LYRICS: Normal body text
+                        else:
+                            if current_title: # Only add lyrics if we have a title active
+                                current_lyrics += text + "\n"
+                            
                 if current_lyrics and not current_lyrics.endswith("\n\n"):
                     current_lyrics += "\n"
 
-    # Catch the very last song in the document
+    # Catch the final song
     if current_title and current_lyrics:
-        songs_data.append({"title": current_title.strip(), "lyrics": current_lyrics.strip()})
+        songs_data.append({"category": current_category.strip(), "title": current_title.strip(), "lyrics": current_lyrics.strip()})
 
     # Wipe old database to prevent duplicates
     db.query(SongDB).delete()
@@ -209,21 +226,14 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
 
     saved_count = 0
     for song in songs_data:
-        # Clean up the spacing so it looks perfect on Android
         clean_lyrics = re.sub(r'\n{3,}', '\n\n', song["lyrics"])
-        
-        # BONUS: This regex strips away any leading numbers, parentheses, or dashes 
-        # from the title (e.g., "(1) Mangalacarana" becomes just "Mangalacarana")
-        # so your Kirtan Hub list looks incredibly clean and uniform.
-        clean_title = re.sub(r'^[\(\d\)\.\-\s]+', '', song["title"])
-
-        if clean_title and clean_lyrics:
-            new_song = SongDB(title=clean_title, lyrics=clean_lyrics)
+        if song["title"] and clean_lyrics:
+            new_song = SongDB(category=song["category"], title=song["title"], lyrics=clean_lyrics)
             db.add(new_song)
             saved_count += 1
         
     db.commit()
-    return {"message": "Parsed via Font Analysis", "songs_extracted": saved_count}
+    return {"message": "Parsed via Two-Tier Heuristics", "songs_extracted": saved_count}
 
 @app.get("/api/songs")
 def get_songs(db: Session = Depends(get_db)):
