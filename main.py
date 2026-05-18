@@ -150,49 +150,80 @@ def rsvp_to_event(event_id: int, rsvp: RSVPRequest, db: Session = Depends(get_db
 
 @app.post("/api/songs/upload")
 async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Automated PDF Pipeline: Parses Songbook PDF into localized database chunks"""
+    """Automated PDF Pipeline: Parses Songbook via Font Size heuristics"""
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Must be a PDF file")
-    
+
     pdf_bytes = await file.read()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    
-    full_text = "\n"
+
+    songs_data = []
+    current_title = ""
+    current_lyrics = ""
+
+    # Threshold: Standard lyrics are usually size 10-12. Titles are usually 14+.
+    # We trigger a new song whenever the font size hits 13 or higher.
+    TITLE_SIZE_THRESHOLD = 13.0
+
     for page in doc:
-        # Use "blocks" to respect the visual paragraph spacing in the PDF
-        blocks = page.get_text("blocks")
+        # The "dict" format gives us granular data including exact font sizes
+        blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+        
         for b in blocks:
-            block_text = b[4].strip()
-            
-            # Instantly destroy stray page numbers
-            if block_text.isdigit():
-                continue
-                
-            if block_text:
-                # Force a double line break between distinct visual paragraphs
-                full_text += block_text + "\n\n"
-    
-    chunks = re.split(r'\n\s*(\(\d+\)\s+[^\n]+)\s*\n', full_text)
-    
-    # Wipe the old database to prevent duplicates when re-uploading
+            if b['type'] == 0:  # Type 0 means it is text, not an image
+                for line in b["lines"]:
+                    for span in line["spans"]:
+                        text = span["text"].strip()
+                        
+                        # Skip empty spaces and stray page numbers instantly
+                        if not text or text.isdigit():
+                            continue
+                            
+                        font_size = span["size"]
+                        
+                        # Is this text large enough to be a Title?
+                        if font_size >= TITLE_SIZE_THRESHOLD:
+                            # If we were already reading a song, save it before starting a new one
+                            if current_title and current_lyrics:
+                                songs_data.append({"title": current_title.strip(), "lyrics": current_lyrics.strip()})
+                                current_lyrics = "" 
+                                current_title = text 
+                            else:
+                                # Append to the current title (in case the title wraps to two lines)
+                                current_title += " " + text
+                        else:
+                            # This is smaller body text (Sanskrit/Spanish)
+                            current_lyrics += text + "\n"
+                            
+                # Add our double line break at the end of every visual block for the Java UI
+                if current_lyrics and not current_lyrics.endswith("\n\n"):
+                    current_lyrics += "\n"
+
+    # Catch the very last song in the document
+    if current_title and current_lyrics:
+        songs_data.append({"title": current_title.strip(), "lyrics": current_lyrics.strip()})
+
+    # Wipe old database to prevent duplicates
     db.query(SongDB).delete()
     db.commit()
-    
+
     saved_count = 0
-    for i in range(1, len(chunks)-1, 2):
-        title = chunks[i].strip()
-        lyrics = chunks[i+1].strip()
+    for song in songs_data:
+        # Clean up the spacing so it looks perfect on Android
+        clean_lyrics = re.sub(r'\n{3,}', '\n\n', song["lyrics"])
         
-        # Clean up any excessive spacing
-        lyrics = re.sub(r'\n{3,}', '\n\n', lyrics)
-        
-        if title and lyrics:
-            new_song = SongDB(title=title, lyrics=lyrics)
+        # BONUS: This regex strips away any leading numbers, parentheses, or dashes 
+        # from the title (e.g., "(1) Mangalacarana" becomes just "Mangalacarana")
+        # so your Kirtan Hub list looks incredibly clean and uniform.
+        clean_title = re.sub(r'^[\(\d\)\.\-\s]+', '', song["title"])
+
+        if clean_title and clean_lyrics:
+            new_song = SongDB(title=clean_title, lyrics=clean_lyrics)
             db.add(new_song)
             saved_count += 1
-            
+        
     db.commit()
-    return {"message": "PDF Parsed successfully", "songs_extracted": saved_count}
+    return {"message": "Parsed via Font Analysis", "songs_extracted": saved_count}
 
 @app.get("/api/songs")
 def get_songs(db: Session = Depends(get_db)):
