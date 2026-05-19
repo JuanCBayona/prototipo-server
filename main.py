@@ -1,5 +1,6 @@
 import os
 import re
+from fastapi import Form
 import fitz  # PyMuPDF
 from typing import List, Optional
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Body
@@ -8,6 +9,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 import firebase_admin
 from firebase_admin import credentials, messaging
+
 
 # ==========================================
 # 1. DATABASE CONFIGURATION
@@ -149,8 +151,14 @@ def rsvp_to_event(event_id: int, rsvp: RSVPRequest, db: Session = Depends(get_db
     updated = db.query(ResourceDB).filter(ResourceDB.event_id == event_id).all()
     return {"message": f"RSVP confirmed for {rsvp.attendees}", "updated_resources": updated}
 
+
+
 @app.post("/api/songs/upload")
-async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_pdf(
+    category: str = Form(...),  # Reads the explicit section name from Android
+    file: UploadFile = File(...), 
+    db: Session = Depends(get_db)
+):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Must be a PDF file")
 
@@ -159,51 +167,43 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
 
     full_text = "\n"
     for page in doc:
-        # We removed the 'page.number < 4' line so it no longer skips your extract!
-        
-        # We use blocks to naturally find the spaces between paragraphs
         blocks = page.get_text("blocks")
         for b in blocks:
             block_text = b[4].strip()
             
-            # Instantly destroy stray page numbers
+            # Instantly drop page numbers
             if block_text.isdigit():
                 continue
                 
             if block_text:
-                # Force a double line break between distinct visual paragraphs for the Android UI
                 full_text += block_text + "\n\n"
     
-    # The reliable Regex that hunts for the "(1) Title" pattern
+    # Rely on our rock-solid, predictable song split regex
     chunks = re.split(r'\n\s*(\(\d+\)\s+[^\n]+)\s*\n', full_text)
     
-    # Wipe the old database to prevent duplicates
-    db.query(SongDB).delete()
+    # CRITICAL: We do NOT wipe the database anymore (.delete()).
+    # Wiping it would delete previous sections you uploaded!
+    # Instead, we just clear out any songs matching this specific section to prevent duplicates.
+    db.query(SongDB).filter(SongDB.category == category.strip()).delete()
     db.commit()
-    
-    # The text before the very first song contains the section title (e.g., "Vandana")
-    raw_category = chunks[0].strip() if len(chunks) > 0 else "General"
-    category_name = raw_category.split('\n')[-1].strip() if raw_category else "General"
     
     saved_count = 0
     for i in range(1, len(chunks)-1, 2):
         title = chunks[i].strip()
         lyrics = chunks[i+1].strip()
         
-        # Clean up any excessive spacing in the lyrics
+        # Format the line breaks perfectly for the Android detail viewer
         lyrics = re.sub(r'\n{3,}', '\n\n', lyrics)
-        
-        # Strip the "(1) " prefix from the title so it looks clean in the app
         clean_title = re.sub(r'^[\(\d\)\.\-\s]+', '', title)
         
         if clean_title and lyrics:
-            # We save it with the category so your Android app doesn't crash
-            new_song = SongDB(category=category_name, title=clean_title, lyrics=lyrics)
+            # Stamp with the exact user-defined category name
+            new_song = SongDB(category=category.strip(), title=clean_title, lyrics=lyrics)
             db.add(new_song)
             saved_count += 1
             
     db.commit()
-    return {"message": "Parsed via Regex blocks", "songs_extracted": saved_count}
+    return {"message": f"Added to {category}", "songs_extracted": saved_count}
 
 @app.get("/api/songs")
 def get_songs(db: Session = Depends(get_db)):
