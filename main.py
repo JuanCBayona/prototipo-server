@@ -153,9 +153,10 @@ def rsvp_to_event(event_id: int, rsvp: RSVPRequest, db: Session = Depends(get_db
 
 
 
+
 @app.post("/api/songs/upload")
 async def upload_pdf(
-    category: str = Form(...),  # Reads the explicit section name from Android
+    category: str = Form(...),  
     file: UploadFile = File(...), 
     db: Session = Depends(get_db)
 ):
@@ -171,34 +172,28 @@ async def upload_pdf(
         for b in blocks:
             block_text = b[4].strip()
             
-            # Instantly drop page numbers
             if block_text.isdigit():
                 continue
                 
             if block_text:
                 full_text += block_text + "\n\n"
     
-    # Rely on our rock-solid, predictable song split regex
-    chunks = re.split(r'\n\s*(\(\d+\)\s+[^\n]+)\s*\n', full_text)
+    # UPDATED REGEX: Now catches titles even if they are JUST a number like "(5)"
+    chunks = re.split(r'\n\s*(\(\d+\)[^\n]*)\s*\n', full_text)
     
-    # CRITICAL: We do NOT wipe the database anymore (.delete()).
-    # Wiping it would delete previous sections you uploaded!
-    # Instead, we just clear out any songs matching this specific section to prevent duplicates.
     db.query(SongDB).filter(SongDB.category == category.strip()).delete()
     db.commit()
     
     saved_count = 0
     for i in range(1, len(chunks)-1, 2):
+        # We no longer strip the numbers out! Whatever the title is, we keep it.
         title = chunks[i].strip()
         lyrics = chunks[i+1].strip()
         
-        # Format the line breaks perfectly for the Android detail viewer
         lyrics = re.sub(r'\n{3,}', '\n\n', lyrics)
-        clean_title = re.sub(r'^[\(\d\)\.\-\s]+', '', title)
         
-        if clean_title and lyrics:
-            # Stamp with the exact user-defined category name
-            new_song = SongDB(category=category.strip(), title=clean_title, lyrics=lyrics)
+        if title and lyrics:
+            new_song = SongDB(category=category.strip(), title=title, lyrics=lyrics)
             db.add(new_song)
             saved_count += 1
             
